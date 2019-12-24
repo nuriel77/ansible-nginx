@@ -9,6 +9,3 @@
   systemd:
     name: nginx.service
     state: reloaded
-
-- name: reload systemd
-  command: systemctl daemon-reload
