@@ -4,6 +4,8 @@
     tag: "{{ nginx_tag }}"
     force_source: "{{ force_pull_image | default('no') }}"
     source: pull
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
   notify:
     - restart nginx
   register: download_image_status
@@ -22,6 +24,8 @@
     tag: "{{ nginx_tag }}"
     force_source: "{{ force_pull_image | default('no') }}"
     source: pull
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
   notify:
     - restart nginx
   register: download_image_status
@@ -52,6 +56,8 @@
 
     - name: export the image to a file
       delegate_to: "{{ groups['fullnode']|first }}"
+      vars:
+        ansible_python_interpreter: /usr/bin/python3
       docker_image:
         name: "{{ this_image }}"
         tag: "{{ this_tag }}"
@@ -71,6 +77,8 @@
         tag: "{{ this_tag }}"
         load_path: "{{ this_file }}"
         source: load
+      vars:
+        ansible_python_interpreter: /usr/bin/python3
       when:
         - image_copied.changed
       notify:
