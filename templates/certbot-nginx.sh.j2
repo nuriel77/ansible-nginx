@@ -1,0 +1,216 @@
+{% raw %}#!/usr/bin/env bash
+#### prerequisites
+# - Fully qualified domain name registered and poiting to the IP of your node
+# - Node installed by {% endraw %}{{ playbook_basename }}{% raw %}-playbook) with nginx enabled
+
+# This script will automate certificate creation and renewal for let's encrypt and haproxy
+# - checks all certificates under /etc/letsencrypt/live and renews
+#   those that are about to expire in less than 4 weeks
+# - reload nginx
+# - install renewal crontab
+
+#### USAGE
+# The script takes one or two arguments:
+# - argument 1: email address (becomes your acme/letsencrypt account)
+# - argument 2: domain name to issue a new certificate for
+# If you only specify the email address, certificates will be renewed.
+# If you specify both email and domain, a new certificate will be requested.
+
+if [[ $EUID -ne 0 ]]; then
+   echo "This script must be run as user root"
+   echo "Please change to root using: 'sudo su -' and re-run the script"
+   exit 1
+fi
+
+###################
+## configuration ##
+###################
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+PLAYBOOK_BASEDIR="/opt/{% endraw %}{{ playbook_basename }}{% raw %}-playbook"
+
+# Set defaults
+: ${DOCKER_IMAGE:=certbot/certbot:{% endraw %}{{ certbot_tag }}{% raw %}}
+NGINX_RESTART_CMD="/bin/systemctl restart nginx"
+NGINX_RELOAD_CMD="/bin/systemctl reload nginx"
+WEB_ROOT="/var/www/html"
+LETSENCRYPT_ROOT="/var/www/letsencrypt"
+
+# Add cli options
+[[ "${TEST_CERT}" = true ]] && OPTS=" --test-cert"
+[[ "${DRY_RUN}" = true ]] && OPTS=" --dry-run"
+[[ "${FORCE_RENEW}" = true ]] && OPTS+=" --force-renewal"
+
+# Enable to redirect output to logfile (for silent cron jobs)
+LOGFILE="/var/log/certrenewal.log"
+
+######################
+## utility function ##
+######################
+
+function get_email() {
+    echo -n "Enter your email address to register as an account with Let's Encrypt and click [ENTER]: "
+    read EMAIL
+    if [[ "$EMAIL" == "" ]]; then
+        echo "You must provide an email address"
+        get_email
+        return
+    fi
+    echo -n "Please repeat and click [ENTER]: "
+    read EMAIL_CHECK
+    if [ "$EMAIL" != "$EMAIL_CHECK" ]
+    then
+        echo
+        echo "Email addresses do not match!"
+        get_email
+    fi
+}
+
+function get_domain() {
+    echo -n "Enter the domain name that points to this server and click [ENTER]: "
+    read DOMAIN
+    echo -n "Please repeat and click [ENTER]: "
+    read DOMAIN_CHECK
+    if [ "$DOMAIN" != "$DOMAIN_CHECK" ]
+    then
+        echo
+        echo "Domain names do not match!"
+        get_domain
+    fi
+}
+
+# Used to issue new certificates
+function newCert {
+    local RC
+    /usr/bin/docker run \
+      --rm \
+      --name certbot \
+      --cap-drop=ALL \
+      -v /etc/letsencrypt:/etc/letsencrypt:Z \
+      -v /var/log/letsencrypt:/var/log/letsencrypt:Z \
+      -v "${LETSENCRYPT_ROOT}:${LETSENCRYPT_ROOT}:Z" \
+      "$DOCKER_IMAGE" certonly \
+      -w "$LETSENCRYPT_ROOT" \
+      --webroot \
+      --email "${EMAIL}" \
+      --non-interactive \
+      -d "${DOMAIN}" \
+      --agree-tos ${OPTS}
+    RC=$?
+    $NGINX_RESTART_CMD
+    return $RC
+}
+
+# Used to renew exiting certificates
+function issueCert {
+    local DOMAINS=$1
+    local RC
+    /usr/bin/docker run \
+      --rm \
+      --name certbot \
+      --cap-drop=ALL \
+      -v /etc/letsencrypt:/etc/letsencrypt:Z \
+      -v /var/log/letsencrypt:/var/log/letsencrypt:Z \
+      -v /var/log/letsencrypt:/var/log/letsencrypt:Z \
+      -v "${LETSENCRYPT_ROOT}:${LETSENCRYPT_ROOT}:Z" \
+      "$DOCKER_IMAGE" certonly \
+      -w "$LETSENCRYPT_ROOT" \
+      --webroot \
+      --non-interactive \
+      --agree-tos ${OPTS} ${DOMAINS}
+    RC=$?
+    $NGINX_RELOAD_CMD
+    return $RC
+}
+
+function logger_error {
+    if [ -n "${LOGFILE}" ]
+    then
+        echo "[error] [$(date +'%d.%m.%y - %H:%M')] ${1}" >> "${LOGFILE}"
+    fi
+    >&2 echo "[error] ${1}"
+}
+
+function logger_info {
+    if [ -n "${LOGFILE}" ]
+    then
+        echo "[info] [$(date +'%d.%m.%y - %H:%M')] ${1}" >> "${LOGFILE}"
+    else
+        echo "[info] ${1}"
+    fi
+}
+
+function add_renewal_crontab {
+    echo "5 8 * * 6 root /bin/bash /usr/local/bin/certbot-nginx.sh ${EMAIL}" | tee /etc/cron.d/cert_renew > /dev/null
+}
+
+##########
+## main ##
+##########
+if [ -z "$1" ]
+then
+    clear
+    get_email
+    echo
+    get_domain
+else
+    EMAIL=$1
+    DOMAIN=$2
+fi
+
+le_cert_root="/etc/letsencrypt/live"
+renewed_certs=()
+exitcode=0
+if [ -n "$DOMAIN" ]
+then
+    newCert
+    RC=$?
+    if [ $RC -ne 0 ]
+    then
+        logger_error "Error requesting a new certificate for $DOMAIN"
+        exitcode=1
+    fi
+    renewed_certs+=("$DOMAIN")
+    DOMAIN_DIR=$(find "${le_cert_root}" -type d -name "${DOMAIN}*" -print -quit)
+else
+    if [ ! -d ${le_cert_root} ]; then
+        logger_error "${le_cert_root} does not exist!"
+        exit 1
+    fi
+
+    while IFS= read -r -d '' cert; do
+        DOMAIN_DIR=$(dirname "${cert}")
+        if ! openssl x509 -noout -checkend $((4*7*86400)) -in "${cert}" || [[ "${FORCE_RENEW}" = true ]]; then
+            subject="$(openssl x509 -noout -subject -in "${cert}" | grep -o -E 'CN ?= ?[^ ,]+' | tr -d 'CN= ?')"
+            subjectaltnames="$(openssl x509 -noout -text -in "${cert}" | sed -n '/X509v3 Subject Alternative Name/{n;p}' | sed 's/\s//g' | tr -d 'DNS:' | sed 's/,/ /g')"
+            echo "Certificate's CN/subject: '$subject'"
+            echo "Certificates subjectAltNames: '$subjectaltnames'"
+
+            if [ "$subject" != "" ]
+            then
+                domains="-d ${subject}"
+            fi
+
+            for name in ${subjectaltnames}; do
+                if [ "${name}" != "${subject}" ]; then
+                    domains="${domains} -d ${name}"
+                fi
+            done
+
+            echo "IssueCert ${domains}"
+            issueCert "${domains}"
+            if [ $? -ne 0 ]
+            then
+                logger_error "failed to renew certificate! check /var/log/letsencrypt/letsencrypt.log!"
+                exitcode=1
+            else
+                renewed_certs+=("$subject")
+                logger_info "renewed certificate for ${subject}"
+            fi
+        else
+            logger_info "none of the certificates requires renewal"
+        fi
+    done < <(find "${le_cert_root}" -name cert.pem -print0)
+fi
+
+add_renewal_crontab
+{% endraw %}
