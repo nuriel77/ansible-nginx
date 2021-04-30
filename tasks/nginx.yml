@@ -85,7 +85,7 @@
     mode: 0644
     validate: "/usr/local/bin/validate_nginx_config.sh -t %s -d ssl.cfg"
   notify:
-    - restart nginx
+    - reload nginx
   tags:
     - configure_nginx_ssl
 
