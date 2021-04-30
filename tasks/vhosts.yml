@@ -1,5 +1,5 @@
 - name: copy default vhost files for nginx
-  file:
+  copy:
     src: files/default.vhost.conf
     dest: "{{ nginx_config_dir | default('/etc/nginx/conf.d') }}/default.conf"
     mode: 0644
