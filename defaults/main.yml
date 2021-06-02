@@ -3,6 +3,13 @@ nginx_image: nginx
 nginx_tag: latest
 nginx_username: www-data
 nginx_shared_mem_rate_limit: 2m
-nginx_req_per_sec: 10
-vhost_nginx_burst_limit: 25
+nginx_req_per_sec: 25
+vhost_nginx_burst_limit: 100
 nginx_vhost_files: []
+
+# Certbot docker image
+certbot_image: certbot/certbot
+certbot_tag_arch_map:
+  armhf: arm32v6-latest
+  arm64: arm64v8-latest
+  amd64: latest
